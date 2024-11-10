@@ -1,20 +1,14 @@
 import os
-from langchain_huggingface import HuggingFaceEmbeddings,HuggingFaceEndpoint
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFDirectoryLoader
 from langchain.schema.document import Document
 from dotenv import load_dotenv
 load_dotenv()
-api_key = os.getenv("HUGGINGFACEHUB_API_TOKEN")
-langchain_token = os.environ["LANGSMITH_API"] 
 DATA_PATH = "data/"
 
 vectordb_file_path = "faiss_index"
-
-
-model_id = "meta-llama/Llama-3.2-3B-Instruct"
-
 
 model_name = "sentence-transformers/all-MiniLM-L6-v2"
 model_kwargs = {'device': 'cpu'}
@@ -25,13 +19,8 @@ embeddings = HuggingFaceEmbeddings(
         encode_kwargs=encode_kwargs
     )
 
-
-llm = HuggingFaceEndpoint(
-    repo_id=model_id,
-    task="text-generation",
-    temperature=0.5,
-    max_new_tokens=512,
-)
+from langchain_groq import ChatGroq
+llm = ChatGroq(model="llama-3.1-8b-instant")
 
 def load_documents():
     document_loader = PyPDFDirectoryLoader(DATA_PATH)
@@ -53,46 +42,45 @@ def create_vector_database():
     vectordb = FAISS.from_documents(documents=chunks, embedding=embeddings)
     vectordb.save_local(vectordb_file_path)
 
+system_prompt = (
+    "You are an assistant for question-answering tasks. "
+    "Use the following pieces of retrieved context to answer "
+    "the question. If you don't know the answer, say that you "
+    "don't know. Use three sentences maximum and keep the "
+    "answer concise."
+    "\n\n"
+    "{context}"
+)
 
-def format_docs(docs):
-    return "\n\n".join(doc.page_content for doc in docs)
+from langchain.chains import create_history_aware_retriever
+from langchain_core.prompts import MessagesPlaceholder
+from langchain_core.prompts import ChatPromptTemplate
+from langchain.chains import create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
 
+contextualize_q_system_prompt = (
+    "Given a chat history and the latest user question "
+    "which might reference context in the chat history, "
+    "formulate a standalone question which can be understood "
+    "without the chat history. Do NOT answer the question, "
+    "just reformulate it if needed and otherwise return it as is."
+)
 
+contextualize_q_prompt = ChatPromptTemplate.from_messages(
+    [
+        ("system", contextualize_q_system_prompt),
+        MessagesPlaceholder("chat_history"),
+        ("human", "{input}"),
+    ]
+)
 
-from langchain_core.runnables import Runnable
-
-class Llama3PromptRunnable(Runnable):
-    def __init__(self, system=""):
-        super().__init__()
-        self.system = system
-
-    def invoke(self, inputs: dict, config=None) -> str:
-        question = inputs["question"]
-        context = inputs["context"]
-        # Create the system prompt if provided
-        system_prompt = ""
-        if self.system != "":
-            system_prompt = (
-                f"<|start_header_id|>system<|end_header_id|>\n\n{self.system}\n\n"
-                f"context: {context}\n\n"
-                f"<|eot_id|>\n\n"
-            )
-            prompt = (
-                f"<|begin_of_text|>{system_prompt}"
-                f"<|start_header_id|>user<|end_header_id|>\n\n"
-                f"{question}\n\n"
-                f"<|eot_id|>\n\n"
-                f"<|start_header_id|>assistant<|end_header_id|>\n\n" # header - assistant
-            )
-
-        # Return the formatted prompt
-        return prompt
-
-llama_prompt = Llama3PromptRunnable(system="You are an assistant for question-answering tasks. Use the following pieces of retrieved context to answer the question. If you don't know the answer, just say that you don't know. Use three sentences maximum and keep the answer concise.")
-
-
-from langchain_core.runnables import RunnablePassthrough
-from langchain_core.output_parsers import StrOutputParser
+qa_prompt = ChatPromptTemplate.from_messages(
+    [
+        ("system", system_prompt),
+        MessagesPlaceholder("chat_history"),
+        ("human", "{input}"),
+    ]
+)
 
 def get_qa_chain():
     # Load the vector database from the local folder
@@ -100,19 +88,58 @@ def get_qa_chain():
     # Create a retriever for querying the vector database
     retriever = vectordb.as_retriever()
 
-    rag_chain = (
-        {"context": retriever | format_docs, "question": RunnablePassthrough()} #output {"context":"XX", "question": "YY"}
-        | llama_prompt #take input from previous runable, {"context":"XX", "question": "YY"}, and return prompt str
-        | llm #take input from previous runable, prompt str, to generate the answer
-        | StrOutputParser() #take input from previous runable, answer, to parser output
+    history_aware_retriever = create_history_aware_retriever(
+        llm, retriever, contextualize_q_prompt
     )
+
+    question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
+    rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
 
     return rag_chain
 
+from langchain_core.messages import AIMessage, HumanMessage
+from typing import Sequence
+from langchain_core.messages import BaseMessage
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import START, StateGraph
+from langgraph.graph.message import add_messages
+from typing_extensions import Annotated, TypedDict
 
+class State(TypedDict):
+    input: str
+    chat_history: Annotated[Sequence[BaseMessage], add_messages]
+    context: str
+    answer: str
+    
+    
+def call_model(state: State):
+    response = get_qa_chain().invoke(state)
+    return {
+        "chat_history": [
+            HumanMessage(state["input"]),
+            AIMessage(response["answer"]),
+        ],
+        "context": response["context"],
+        "answer": response["answer"],
+    }
+    
+    
+# Our graph consists only of one node:
+workflow = StateGraph(state_schema=State) 
+workflow.add_edge(START, "model")
+workflow.add_node("model", call_model)    
+    
+memory = MemorySaver()
 
+# config = {"configurable": {"thread_id": "abc123"}}
+def question(config):
+    return workflow.compile(checkpointer=memory)
 
-if __name__ == '__main__':
-    create_vector_database()
-    chain = get_qa_chain()
-    print(chain.invoke("how to win this game?"))
+# if __name__ == '__main__':
+#     create_vector_database()
+#     chain = question(config=config)
+#     result = chain.invoke(
+#         {"input": "What is Werewolf?"},
+#         config=config,
+#     )
+#     print(result["answer"])    

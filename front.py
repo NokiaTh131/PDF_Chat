@@ -1,11 +1,14 @@
 import streamlit as st
-from app import get_qa_chain, create_vector_database
+from app import  create_vector_database, question
+import uuid
+
 
 st.set_page_config(page_title="Werewolf Q&A", layout="centered")
 
+config = {"configurable": {"thread_id": uuid}}
 
 st.title(":green[Werewolf Q&A] 🐺")
-
+st.caption(uuid.uuid4())
 # Button to create the vector database
 if st.button("🔒 create_database"):
     create_vector_database()
@@ -24,7 +27,7 @@ with messages:
         if chat["role"] == "user":
             messages.chat_message("user").write(f"**User:** {chat['message']}")
         else:
-            messages.chat_message("assistant").write(f"**AI:** {chat['message']}")
+            messages.chat_message("assistant").write(f"**Werewolf:** {chat['message']}")
 
 # Chat input for user prompts
 if prompt := st.chat_input("Say something"):
@@ -33,9 +36,10 @@ if prompt := st.chat_input("Say something"):
     messages.chat_message("user").write(f"**User:** {prompt}")
     
     # Generate AI response
-    chain = get_qa_chain()
-    response = chain.invoke(prompt)
+    chain = question(config=config)
+    app = chain.invoke({"input": prompt},config=config,)
+    response = app["answer"]
     
     # Append AI response to chat history and display it
     st.session_state["chat_history"].append({"role": "ai", "message": response})
-    messages.chat_message("assistant").write(f"**AI:** {response}")
+    messages.chat_message("assistant").write(f"**Werewolf:** {response}")
