@@ -1,9 +1,9 @@
 import os
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFDirectoryLoader
-from langchain.schema.document import Document
+from langchain_core.documents import Document
 from dotenv import load_dotenv
 load_dotenv()
 DATA_PATH = "data/"
@@ -20,7 +20,7 @@ embeddings = HuggingFaceEmbeddings(
     )
 
 from langchain_groq import ChatGroq
-llm = ChatGroq(model="llama-3.1-8b-instant")
+llm = ChatGroq(model="meta-llama/llama-4-scout-17b-16e-instruct")
 
 def load_documents():
     document_loader = PyPDFDirectoryLoader(DATA_PATH)
@@ -43,6 +43,7 @@ def create_vector_database():
     vectordb.save_local(vectordb_file_path)
 
 system_prompt = (
+    "You are professional dungeon and dragon board game"
     "You are an assistant for question-answering tasks. "
     "Use the following pieces of retrieved context to answer "
     "the question. If you don't know the answer, say that you "
@@ -131,15 +132,6 @@ workflow.add_node("model", call_model)
     
 memory = MemorySaver()
 
-# config = {"configurable": {"thread_id": "abc123"}}
 def question(config):
     return workflow.compile(checkpointer=memory)
 
-# if __name__ == '__main__':
-#     create_vector_database()
-#     chain = question(config=config)
-#     result = chain.invoke(
-#         {"input": "What is Werewolf?"},
-#         config=config,
-#     )
-#     print(result["answer"])    
